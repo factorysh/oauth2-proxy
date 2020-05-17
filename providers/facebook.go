@@ -3,12 +3,18 @@ package providers
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 
 	"github.com/oauth2-proxy/oauth2-proxy/pkg/apis/sessions"
 	"github.com/oauth2-proxy/oauth2-proxy/pkg/requests"
+)
+
+var (
+	// extra headers required by the Facebook API when making authenticated requests
+	facebookAuthorizationHeaders = map[string]string{
+		acceptHeader: acceptApplicationJSON,
+	}
 )
 
 // FacebookProvider represents an Facebook based Identity Provider
@@ -49,14 +55,6 @@ func NewFacebookProvider(p *ProviderData) *FacebookProvider {
 	return &FacebookProvider{ProviderData: p}
 }
 
-func getFacebookHeader(accessToken string) http.Header {
-	header := make(http.Header)
-	header.Set("Accept", "application/json")
-	header.Set("x-li-format", "json")
-	header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-	return header
-}
-
 // GetEmailAddress returns the Account email address
 func (p *FacebookProvider) GetEmailAddress(ctx context.Context, s *sessions.SessionState) (string, error) {
 	if s.AccessToken == "" {
@@ -66,7 +64,7 @@ func (p *FacebookProvider) GetEmailAddress(ctx context.Context, s *sessions.Sess
 	if err != nil {
 		return "", err
 	}
-	req.Header = getFacebookHeader(s.AccessToken)
+	req.Header = getAuthorizationHeader(tokenTypeBearer, s.AccessToken, facebookAuthorizationHeaders)
 
 	type result struct {
 		Email string
@@ -84,5 +82,5 @@ func (p *FacebookProvider) GetEmailAddress(ctx context.Context, s *sessions.Sess
 
 // ValidateSessionState validates the AccessToken
 func (p *FacebookProvider) ValidateSessionState(ctx context.Context, s *sessions.SessionState) bool {
-	return validateToken(ctx, p, s.AccessToken, getFacebookHeader(s.AccessToken))
+	return validateToken(ctx, p, s.AccessToken, getAuthorizationHeader(tokenTypeBearer, s.AccessToken, facebookAuthorizationHeaders))
 }

@@ -16,6 +16,13 @@ import (
 
 const emailClaim = "email"
 
+var (
+	// extra headers required by the IDP when making authenticated requests
+	oidcAuthorizationHeaders = map[string]string{
+		acceptHeader: acceptApplicationJSON,
+	}
+)
+
 // OIDCProvider represents an OIDC based Identity Provider
 type OIDCProvider struct {
 	*ProviderData
@@ -223,15 +230,7 @@ func (p *OIDCProvider) ValidateSessionState(ctx context.Context, s *sessions.Ses
 	return err == nil
 }
 
-func getOIDCHeader(accessToken string) http.Header {
-	header := make(http.Header)
-	header.Set("Accept", "application/json")
-	header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-	return header
-}
-
 func (p *OIDCProvider) findClaimsFromIDToken(ctx context.Context, idToken *oidc.IDToken, accessToken string, profileURL string) (*OIDCClaims, error) {
-
 	claims := &OIDCClaims{}
 	// Extract default claims.
 	if err := idToken.Claims(&claims); err != nil {
@@ -260,7 +259,7 @@ func (p *OIDCProvider) findClaimsFromIDToken(ctx context.Context, idToken *oidc.
 		if err != nil {
 			return nil, err
 		}
-		req.Header = getOIDCHeader(accessToken)
+		req.Header = getAuthorizationHeader(tokenTypeBearer, accessToken, oidcAuthorizationHeaders)
 
 		respJSON, err := requests.Request(req)
 		if err != nil {

@@ -3,12 +3,19 @@ package providers
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 
 	"github.com/oauth2-proxy/oauth2-proxy/pkg/apis/sessions"
 	"github.com/oauth2-proxy/oauth2-proxy/pkg/requests"
+)
+
+var (
+	// extra headers required by the LinkedIn API when making authenticated requests
+	linkedinAuthorizationHeaders = map[string]string{
+		acceptHeader:  acceptApplicationJSON,
+		"x-li-format": "json",
+	}
 )
 
 // LinkedInProvider represents an LinkedIn based Identity Provider
@@ -45,14 +52,6 @@ func NewLinkedInProvider(p *ProviderData) *LinkedInProvider {
 	return &LinkedInProvider{ProviderData: p}
 }
 
-func getLinkedInHeader(accessToken string) http.Header {
-	header := make(http.Header)
-	header.Set("Accept", "application/json")
-	header.Set("x-li-format", "json")
-	header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-	return header
-}
-
 // GetEmailAddress returns the Account email address
 func (p *LinkedInProvider) GetEmailAddress(ctx context.Context, s *sessions.SessionState) (string, error) {
 	if s.AccessToken == "" {
@@ -62,7 +61,7 @@ func (p *LinkedInProvider) GetEmailAddress(ctx context.Context, s *sessions.Sess
 	if err != nil {
 		return "", err
 	}
-	req.Header = getLinkedInHeader(s.AccessToken)
+	req.Header = getAuthorizationHeader(tokenTypeBearer, s.AccessToken, linkedinAuthorizationHeaders)
 
 	json, err := requests.Request(req)
 	if err != nil {
@@ -78,5 +77,5 @@ func (p *LinkedInProvider) GetEmailAddress(ctx context.Context, s *sessions.Sess
 
 // ValidateSessionState validates the AccessToken
 func (p *LinkedInProvider) ValidateSessionState(ctx context.Context, s *sessions.SessionState) bool {
-	return validateToken(ctx, p, s.AccessToken, getLinkedInHeader(s.AccessToken))
+	return validateToken(ctx, p, s.AccessToken, getAuthorizationHeader(tokenTypeBearer, s.AccessToken, linkedinAuthorizationHeaders))
 }

@@ -17,6 +17,13 @@ import (
 	"github.com/oauth2-proxy/oauth2-proxy/pkg/logger"
 )
 
+var (
+	// extra headers required by the GitHub API when making authenticated requests
+	githubAuthorizationHeaders = map[string]string{
+		acceptHeader: "application/vnd.github.v3+json",
+	}
+)
+
 // GitHubProvider represents an GitHub based Identity Provider
 type GitHubProvider struct {
 	*ProviderData
@@ -61,10 +68,7 @@ func NewGitHubProvider(p *ProviderData) *GitHubProvider {
 }
 
 func getGitHubHeader(accessToken string) http.Header {
-	header := make(http.Header)
-	header.Set("Accept", "application/vnd.github.v3+json")
-	header.Set("Authorization", fmt.Sprintf("token %s", accessToken))
-	return header
+	return getAuthorizationHeader(tokenTypeToken, accessToken, githubAuthorizationHeaders)
 }
 
 // SetOrgTeam adds GitHub org reading parameters to the OAuth2 scope

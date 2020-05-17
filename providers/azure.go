@@ -138,12 +138,6 @@ func (p *AzureProvider) Redeem(ctx context.Context, redirectURL, code string) (s
 	return
 }
 
-func getAzureHeader(accessToken string) http.Header {
-	header := make(http.Header)
-	header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-	return header
-}
-
 func getEmailFromJSON(json *simplejson.Json) (string, error) {
 	var email string
 	var err error
@@ -173,7 +167,7 @@ func (p *AzureProvider) GetEmailAddress(ctx context.Context, s *sessions.Session
 	if err != nil {
 		return "", err
 	}
-	req.Header = getAzureHeader(s.AccessToken)
+	req.Header = getAuthorizationHeader(tokenTypeBearer, s.AccessToken, nil)
 
 	json, err := requests.Request(req)
 
