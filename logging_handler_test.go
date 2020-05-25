@@ -91,6 +91,7 @@ func TestLoggingHandler_PingUserAgent(t *testing.T) {
 	for idx, test := range tests {
 		t.Run(fmt.Sprintf("%d", idx), func(t *testing.T) {
 			opts := options.NewOptions()
+			opts.Cookie.Secret = "secretthirtytwobytes+abcdefghijk"
 			opts.PingUserAgent = "PingMe!"
 			opts.SkipAuthRegex = []string{"/foo"}
 			opts.Upstreams = []string{"static://444/foo"}
@@ -101,9 +102,13 @@ func TestLoggingHandler_PingUserAgent(t *testing.T) {
 			opts.RawRedirectURL = "localhost"
 			validation.Validate(opts)
 
-			p := NewOAuthProxy(opts, func(email string) bool {
+			p, err := NewOAuthProxy(opts, func(email string) bool {
 				return true
 			})
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+
 			p.provider = NewTestProvider(&url.URL{Host: "localhost"}, "")
 
 			buf := bytes.NewBuffer(nil)
