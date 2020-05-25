@@ -36,7 +36,7 @@ func Validate(o *options.Options) error {
 	}
 
 	var cipher encryption.Cipher
-	msgs := validateCookieOptions(o.Cookie)
+	msgs := validateCookie(o.Cookie)
 	if len(msgs) == 0 {
 		// Only set up cipher if there were no issues in config validation
 		var err error

@@ -60,7 +60,7 @@ type Options struct {
 	Banner                   string   `flag:"banner" cfg:"banner"`
 	Footer                   string   `flag:"footer" cfg:"footer"`
 
-	Cookie  CookieOptions  `cfg:",squash"`
+	Cookie  Cookie         `cfg:",squash"`
 	Session SessionOptions `cfg:",squash"`
 	Logging Logging        `cfg:",squash"`
 
@@ -156,7 +156,7 @@ func NewOptions() *Options {
 		RealClientIPHeader:  "X-Real-IP",
 		ForceHTTPS:          false,
 		DisplayHtpasswdForm: true,
-		Cookie:              defaultCookieOptions(),
+		Cookie:              cookieDefaults(),
 		Session: SessionOptions{
 			Type: "cookie",
 		},
