@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,11 +21,11 @@ import (
 	"github.com/oauth2-proxy/oauth2-proxy/pkg/apis/sessions"
 	"github.com/oauth2-proxy/oauth2-proxy/pkg/logger"
 	"github.com/oauth2-proxy/oauth2-proxy/pkg/sessions/cookie"
+	"github.com/oauth2-proxy/oauth2-proxy/pkg/upstream"
 	"github.com/oauth2-proxy/oauth2-proxy/pkg/validation"
 	"github.com/oauth2-proxy/oauth2-proxy/providers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/websocket"
 )
 
 const (
@@ -38,135 +37,6 @@ const (
 
 func init() {
 	logger.SetFlags(logger.Lshortfile)
-
-}
-
-type WebSocketOrRestHandler struct {
-	restHandler http.Handler
-	wsHandler   http.Handler
-}
-
-func (h *WebSocketOrRestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("Upgrade") == "websocket" {
-		h.wsHandler.ServeHTTP(w, r)
-	} else {
-		h.restHandler.ServeHTTP(w, r)
-	}
-}
-
-func TestWebSocketProxy(t *testing.T) {
-	handler := WebSocketOrRestHandler{
-		restHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(200)
-			hostname, _, _ := net.SplitHostPort(r.Host)
-			w.Write([]byte(hostname))
-		}),
-		wsHandler: websocket.Handler(func(ws *websocket.Conn) {
-			defer ws.Close()
-			var data []byte
-			err := websocket.Message.Receive(ws, &data)
-			if err != nil {
-				t.Fatalf("err %s", err)
-				return
-			}
-			err = websocket.Message.Send(ws, data)
-			if err != nil {
-				t.Fatalf("err %s", err)
-			}
-		}),
-	}
-	backend := httptest.NewServer(&handler)
-	defer backend.Close()
-
-	backendURL, _ := url.Parse(backend.URL)
-
-	options := options.NewOptions()
-	var auth hmacauth.HmacAuth
-	options.PassHostHeader = true
-	proxyHandler := NewWebSocketOrRestReverseProxy(backendURL, options, auth)
-	frontend := httptest.NewServer(proxyHandler)
-	defer frontend.Close()
-
-	frontendURL, _ := url.Parse(frontend.URL)
-	frontendWSURL := "ws://" + frontendURL.Host + "/"
-
-	ws, err := websocket.Dial(frontendWSURL, "", "http://localhost/")
-	if err != nil {
-		t.Fatalf("err %s", err)
-	}
-	request := []byte("hello, world!")
-	err = websocket.Message.Send(ws, request)
-	if err != nil {
-		t.Fatalf("err %s", err)
-	}
-	var response = make([]byte, 1024)
-	websocket.Message.Receive(ws, &response)
-	if err != nil {
-		t.Fatalf("err %s", err)
-	}
-	if g, e := string(request), string(response); g != e {
-		t.Errorf("got body %q; expected %q", g, e)
-	}
-
-	getReq, _ := http.NewRequest("GET", frontend.URL, nil)
-	res, _ := http.DefaultClient.Do(getReq)
-	bodyBytes, _ := ioutil.ReadAll(res.Body)
-	backendHostname, _, _ := net.SplitHostPort(backendURL.Host)
-	if g, e := string(bodyBytes), backendHostname; g != e {
-		t.Errorf("got body %q; expected %q", g, e)
-	}
-}
-
-func TestNewReverseProxy(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		hostname, _, _ := net.SplitHostPort(r.Host)
-		w.Write([]byte(hostname))
-	}))
-	defer backend.Close()
-
-	backendURL, _ := url.Parse(backend.URL)
-	backendHostname, backendPort, _ := net.SplitHostPort(backendURL.Host)
-	backendHost := net.JoinHostPort(backendHostname, backendPort)
-	proxyURL, _ := url.Parse(backendURL.Scheme + "://" + backendHost + "/")
-
-	proxyHandler := NewReverseProxy(proxyURL, &options.Options{FlushInterval: time.Second})
-	setProxyUpstreamHostHeader(proxyHandler, proxyURL)
-	frontend := httptest.NewServer(proxyHandler)
-	defer frontend.Close()
-
-	getReq, _ := http.NewRequest("GET", frontend.URL, nil)
-	res, _ := http.DefaultClient.Do(getReq)
-	bodyBytes, _ := ioutil.ReadAll(res.Body)
-	if g, e := string(bodyBytes), backendHostname; g != e {
-		t.Errorf("got body %q; expected %q", g, e)
-	}
-}
-
-func TestEncodedSlashes(t *testing.T) {
-	var seen string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		seen = r.RequestURI
-	}))
-	defer backend.Close()
-
-	b, _ := url.Parse(backend.URL)
-	proxyHandler := NewReverseProxy(b, &options.Options{FlushInterval: time.Second})
-	setProxyDirector(proxyHandler)
-	frontend := httptest.NewServer(proxyHandler)
-	defer frontend.Close()
-
-	f, _ := url.Parse(frontend.URL)
-	encodedPath := "/a%2Fb/?c=1"
-	getReq := &http.Request{URL: &url.URL{Scheme: "http", Host: f.Host, Opaque: encodedPath}}
-	_, err := http.DefaultClient.Do(getReq)
-	if err != nil {
-		t.Fatalf("err %s", err)
-	}
-	if seen != encodedPath {
-		t.Errorf("got bad request %q expected %q", seen, encodedPath)
-	}
 }
 
 func TestRobotsTxt(t *testing.T) {
@@ -176,7 +46,8 @@ func TestRobotsTxt(t *testing.T) {
 	opts.Cookie.Secret = rawCookieSecret
 	validation.Validate(opts)
 
-	proxy := NewOAuthProxy(opts, func(string) bool { return true })
+	proxy, err := NewOAuthProxy(opts, func(string) bool { return true })
+	assert.Equal(t, nil, err)
 	rw := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/robots.txt", nil)
 	proxy.ServeHTTP(rw, req)
@@ -200,7 +71,8 @@ func TestIsValidRedirect(t *testing.T) {
 	}
 	validation.Validate(opts)
 
-	proxy := NewOAuthProxy(opts, func(string) bool { return true })
+	proxy, err := NewOAuthProxy(opts, func(string) bool { return true })
+	assert.Equal(t, nil, err)
 
 	testCases := []struct {
 		Desc, Redirect string
@@ -461,7 +333,13 @@ func TestBasicAuthPassword(t *testing.T) {
 		w.Write([]byte(payload))
 	}))
 	opts := options.NewOptions()
-	opts.Upstreams = append(opts.Upstreams, providerServer.URL)
+	opts.UpstreamServers = options.Upstreams{
+		{
+			ID:   providerServer.URL,
+			Path: "/",
+			URI:  providerServer.URL,
+		},
+	}
 	// The CookieSecret must be 32 bytes in order to create the AES
 	// cipher.
 	opts.Cookie.Secret = "xyzzyplughxyzzyplughxyzzyplughxp"
@@ -479,9 +357,10 @@ func TestBasicAuthPassword(t *testing.T) {
 	const emailAddress = "john.doe@example.com"
 
 	opts.SetProvider(NewTestProvider(providerURL, emailAddress))
-	proxy := NewOAuthProxy(opts, func(email string) bool {
+	proxy, err := NewOAuthProxy(opts, func(email string) bool {
 		return email == emailAddress
 	})
+	assert.Equal(t, nil, err)
 
 	rw := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/oauth2/callback?code=callback_code&state=nonce:", strings.NewReader(""))
@@ -550,9 +429,10 @@ func TestBasicAuthWithEmail(t *testing.T) {
 	{
 		rw := httptest.NewRecorder()
 		req, _ := http.NewRequest("GET", opts.ProxyPrefix+"/testCase0", nil)
-		proxy := NewOAuthProxy(opts, func(email string) bool {
+		proxy, err := NewOAuthProxy(opts, func(email string) bool {
 			return email == emailAddress
 		})
+		assert.Equal(t, nil, err)
 		proxy.addHeadersForProxying(rw, req, session)
 		assert.Equal(t, expectedUserHeader, req.Header["Authorization"][0])
 		assert.Equal(t, userName, req.Header["X-Forwarded-User"][0])
@@ -563,9 +443,10 @@ func TestBasicAuthWithEmail(t *testing.T) {
 		rw := httptest.NewRecorder()
 		req, _ := http.NewRequest("GET", opts.ProxyPrefix+"/testCase1", nil)
 
-		proxy := NewOAuthProxy(opts, func(email string) bool {
+		proxy, err := NewOAuthProxy(opts, func(email string) bool {
 			return email == emailAddress
 		})
+		assert.Equal(t, nil, err)
 		proxy.addHeadersForProxying(rw, req, session)
 		assert.Equal(t, expectedEmailHeader, req.Header["Authorization"][0])
 		assert.Equal(t, emailAddress, req.Header["X-Forwarded-User"][0])
@@ -592,9 +473,10 @@ func TestPassUserHeadersWithEmail(t *testing.T) {
 	{
 		rw := httptest.NewRecorder()
 		req, _ := http.NewRequest("GET", opts.ProxyPrefix+"/testCase0", nil)
-		proxy := NewOAuthProxy(opts, func(email string) bool {
+		proxy, err := NewOAuthProxy(opts, func(email string) bool {
 			return email == emailAddress
 		})
+		assert.Equal(t, nil, err)
 		proxy.addHeadersForProxying(rw, req, session)
 		assert.Equal(t, userName, req.Header["X-Forwarded-User"][0])
 	}
@@ -604,9 +486,10 @@ func TestPassUserHeadersWithEmail(t *testing.T) {
 		rw := httptest.NewRecorder()
 		req, _ := http.NewRequest("GET", opts.ProxyPrefix+"/testCase1", nil)
 
-		proxy := NewOAuthProxy(opts, func(email string) bool {
+		proxy, err := NewOAuthProxy(opts, func(email string) bool {
 			return email == emailAddress
 		})
+		assert.Equal(t, nil, err)
 		proxy.addHeadersForProxying(rw, req, session)
 		assert.Equal(t, emailAddress, req.Header["X-Forwarded-User"][0])
 	}
@@ -620,7 +503,7 @@ type PassAccessTokenTest struct {
 
 type PassAccessTokenTestOptions struct {
 	PassAccessToken bool
-	ProxyUpstream   string
+	ProxyUpstream   options.Upstream
 }
 
 func NewPassAccessTokenTest(opts PassAccessTokenTestOptions) *PassAccessTokenTest {
@@ -643,9 +526,15 @@ func NewPassAccessTokenTest(opts PassAccessTokenTestOptions) *PassAccessTokenTes
 		}))
 
 	t.opts = options.NewOptions()
-	t.opts.Upstreams = append(t.opts.Upstreams, t.providerServer.URL)
-	if opts.ProxyUpstream != "" {
-		t.opts.Upstreams = append(t.opts.Upstreams, opts.ProxyUpstream)
+	t.opts.UpstreamServers = options.Upstreams{
+		{
+			ID:   t.providerServer.URL,
+			Path: "/",
+			URI:  t.providerServer.URL,
+		},
+	}
+	if opts.ProxyUpstream.ID != "" {
+		t.opts.UpstreamServers = append(t.opts.UpstreamServers, opts.ProxyUpstream)
 	}
 	// The CookieSecret must be 32 bytes in order to create the AES
 	// cipher.
@@ -660,9 +549,13 @@ func NewPassAccessTokenTest(opts PassAccessTokenTestOptions) *PassAccessTokenTes
 	const emailAddress = "michael.bland@gsa.gov"
 
 	t.opts.SetProvider(NewTestProvider(providerURL, emailAddress))
-	t.proxy = NewOAuthProxy(t.opts, func(email string) bool {
+	var err error
+	t.proxy, err = NewOAuthProxy(t.opts, func(email string) bool {
 		return email == emailAddress
 	})
+	if err != nil {
+		panic(err)
+	}
 	return t
 }
 
@@ -745,7 +638,11 @@ func TestForwardAccessTokenUpstream(t *testing.T) {
 func TestStaticProxyUpstream(t *testing.T) {
 	patTest := NewPassAccessTokenTest(PassAccessTokenTestOptions{
 		PassAccessToken: true,
-		ProxyUpstream:   "static://200/static-proxy",
+		ProxyUpstream: options.Upstream{
+			ID:     "static-proxy",
+			Path:   "/static-proxy",
+			Static: true,
+		},
 	})
 
 	defer patTest.Close()
@@ -808,9 +705,13 @@ func NewSignInPageTest(skipProvider bool) *SignInPageTest {
 	sipTest.opts.SkipProviderButton = skipProvider
 	validation.Validate(sipTest.opts)
 
-	sipTest.proxy = NewOAuthProxy(sipTest.opts, func(email string) bool {
+	var err error
+	sipTest.proxy, err = NewOAuthProxy(sipTest.opts, func(email string) bool {
 		return true
 	})
+	if err != nil {
+		panic(err)
+	}
 	sipTest.signInRegexp = regexp.MustCompile(signInRedirectPattern)
 	sipTest.signInProviderRegexp = regexp.MustCompile(signInSkipProvider)
 
@@ -914,9 +815,13 @@ func NewProcessCookieTest(opts ProcessCookieTestOpts, modifiers ...OptionsModifi
 	pcTest.opts.Cookie.Refresh = time.Hour
 	validation.Validate(pcTest.opts)
 
-	pcTest.proxy = NewOAuthProxy(pcTest.opts, func(email string) bool {
+	var err error
+	pcTest.proxy, err = NewOAuthProxy(pcTest.opts, func(email string) bool {
 		return pcTest.validateUser
 	})
+	if err != nil {
+		panic(err)
+	}
 	pcTest.proxy.provider = &TestProvider{
 		ValidToken: opts.providerValidateCookieResponse,
 	}
@@ -1120,9 +1025,13 @@ func TestAuthOnlyEndpointSetXAuthRequestHeaders(t *testing.T) {
 	pcTest.opts.SetXAuthRequest = true
 	validation.Validate(pcTest.opts)
 
-	pcTest.proxy = NewOAuthProxy(pcTest.opts, func(email string) bool {
+	var err error
+	pcTest.proxy, err = NewOAuthProxy(pcTest.opts, func(email string) bool {
 		return pcTest.validateUser
 	})
+	if err != nil {
+		panic(err)
+	}
 	pcTest.proxy.provider = &TestProvider{
 		ValidToken: true,
 	}
@@ -1152,9 +1061,13 @@ func TestAuthOnlyEndpointSetBasicAuthTrueRequestHeaders(t *testing.T) {
 	pcTest.opts.SetBasicAuth = true
 	validation.Validate(pcTest.opts)
 
-	pcTest.proxy = NewOAuthProxy(pcTest.opts, func(email string) bool {
+	var err error
+	pcTest.proxy, err = NewOAuthProxy(pcTest.opts, func(email string) bool {
 		return pcTest.validateUser
 	})
+	if err != nil {
+		panic(err)
+	}
 	pcTest.proxy.provider = &TestProvider{
 		ValidToken: true,
 	}
@@ -1186,9 +1099,13 @@ func TestAuthOnlyEndpointSetBasicAuthFalseRequestHeaders(t *testing.T) {
 	pcTest.opts.SetBasicAuth = false
 	validation.Validate(pcTest.opts)
 
-	pcTest.proxy = NewOAuthProxy(pcTest.opts, func(email string) bool {
+	var err error
+	pcTest.proxy, err = NewOAuthProxy(pcTest.opts, func(email string) bool {
 		return pcTest.validateUser
 	})
+	if err != nil {
+		panic(err)
+	}
 	pcTest.proxy.provider = &TestProvider{
 		ValidToken: true,
 	}
@@ -1219,7 +1136,13 @@ func TestAuthSkippedForPreflightRequests(t *testing.T) {
 	defer upstream.Close()
 
 	opts := options.NewOptions()
-	opts.Upstreams = append(opts.Upstreams, upstream.URL)
+	opts.UpstreamServers = options.Upstreams{
+		{
+			ID:   upstream.URL,
+			Path: "/",
+			URI:  upstream.URL,
+		},
+	}
 	opts.ClientID = "aljsal"
 	opts.ClientSecret = "jglkfsdgj"
 	opts.Cookie.Secret = base64CookieSecret
@@ -1229,7 +1152,8 @@ func TestAuthSkippedForPreflightRequests(t *testing.T) {
 	upstreamURL, _ := url.Parse(upstream.URL)
 	opts.SetProvider(NewTestProvider(upstreamURL, ""))
 
-	proxy := NewOAuthProxy(opts, func(string) bool { return false })
+	proxy, err := NewOAuthProxy(opts, func(string) bool { return false })
+	assert.Equal(t, nil, err)
 	rw := httptest.NewRecorder()
 	req, _ := http.NewRequest("OPTIONS", "/preflight-request", nil)
 	proxy.ServeHTTP(rw, req)
@@ -1278,7 +1202,13 @@ func NewSignatureTest() *SignatureTest {
 	upstream := httptest.NewServer(
 		http.HandlerFunc(authenticator.Authenticate))
 	upstreamURL, _ := url.Parse(upstream.URL)
-	opts.Upstreams = append(opts.Upstreams, upstream.URL)
+	opts.UpstreamServers = options.Upstreams{
+		{
+			ID:   upstream.URL,
+			Path: "/",
+			URI:  upstream.URL,
+		},
+	}
 
 	providerHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"access_token": "my_auth_token"}`))
@@ -1324,7 +1254,10 @@ func (st *SignatureTest) MakeRequestWithExpectedKey(method, body, key string) {
 	if err != nil {
 		panic(err)
 	}
-	proxy := NewOAuthProxy(st.opts, func(email string) bool { return true })
+	proxy, err := NewOAuthProxy(st.opts, func(email string) bool { return true })
+	if err != nil {
+		panic(err)
+	}
 
 	var bodyBuf io.ReadCloser
 	if body != "" {
@@ -1344,7 +1277,7 @@ func (st *SignatureTest) MakeRequestWithExpectedKey(method, body, key string) {
 	}
 	// This is used by the upstream to validate the signature.
 	st.authenticator.auth = hmacauth.NewHmacAuth(
-		crypto.SHA1, []byte(key), SignatureHeader, SignatureHeaders)
+		crypto.SHA1, []byte(key), upstream.SignatureHeader, upstream.SignatureHeaders)
 	proxy.ServeHTTP(st.rw, req)
 }
 
@@ -1379,7 +1312,8 @@ func TestGetRedirect(t *testing.T) {
 	options := options.NewOptions()
 	_ = validation.Validate(options)
 	require.NotEmpty(t, options.ProxyPrefix)
-	proxy := NewOAuthProxy(options, func(s string) bool { return false })
+	proxy, err := NewOAuthProxy(options, func(s string) bool { return false })
+	assert.Equal(t, nil, err)
 
 	tests := []struct {
 		name             string
@@ -1420,9 +1354,14 @@ func newAjaxRequestTest() *ajaxRequestTest {
 	test.opts.ClientID = "gkljfdl"
 	test.opts.ClientSecret = "sdflkjs"
 	validation.Validate(test.opts)
-	test.proxy = NewOAuthProxy(test.opts, func(email string) bool {
+
+	var err error
+	test.proxy, err = NewOAuthProxy(test.opts, func(email string) bool {
 		return true
 	})
+	if err != nil {
+		panic(err)
+	}
 	return test
 }
 
@@ -1684,12 +1623,19 @@ func Test_noCacheHeadersDoesNotExistsInResponseHeadersFromUpstream(t *testing.T)
 	t.Cleanup(upstream.Close)
 
 	opts := options.NewOptions()
-	opts.Upstreams = []string{upstream.URL}
+	opts.UpstreamServers = options.Upstreams{
+		{
+			ID:   upstream.URL,
+			Path: "/",
+			URI:  upstream.URL,
+		},
+	}
 	opts.SkipAuthRegex = []string{".*"}
 	_ = validation.Validate(opts)
-	proxy := NewOAuthProxy(opts, func(email string) bool {
+	proxy, err := NewOAuthProxy(opts, func(email string) bool {
 		return true
 	})
+	assert.Equal(t, nil, err)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/upstream", nil)
