@@ -55,6 +55,7 @@
 
 ## Changes since v5.1.1
 
+- [#576](https://github.com/oauth2-proxy/oauth2-proxy/pull/576) Separate Cookie validation out of main options validation (@JoelSpeed)
 - [#604](https://github.com/oauth2-proxy/oauth2-proxy/pull/604) Add Keycloak local testing environment (@EvgeniGordeev)
 - [#539](https://github.com/oauth2-proxy/oauth2-proxy/pull/539) Refactor encryption ciphers and add AES-GCM support (@NickMeves)
 - [#601](https://github.com/oauth2-proxy/oauth2-proxy/pull/601) Ensure decrypted user/email are valid UTF8 (@JoelSpeed)
